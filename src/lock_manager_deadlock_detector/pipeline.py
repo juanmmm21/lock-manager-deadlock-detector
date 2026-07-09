@@ -229,6 +229,10 @@ class LockManager(Generic[ResourceKey]):
             req.outcome = RequestOutcome.GRANTED
             self._pending_by_txn.pop(req.txn_id, None)
             self._held_resources.setdefault(req.txn_id, set()).add(resource)
+            # una petición concedida deja de "esperar a" nadie: si no se
+            # limpia aquí, `_recompute_edges` no la vería (ya no está en la
+            # cola) y dejaría una arista fantasma en el wait-for graph.
+            self._wait_for.pop(req.txn_id, None)
         if not queue:
             del self._wait_queue[resource]
         if not holders:
