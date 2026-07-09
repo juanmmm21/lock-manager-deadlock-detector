@@ -207,6 +207,16 @@ class LockManager(Generic[ResourceKey]):
         with self._cond:
             return {txn: frozenset(blockers) for txn, blockers in self._wait_for.items()}
 
+    def snapshot_holders(self) -> dict[ResourceKey, dict[TransactionId, LockMode]]:
+        """Copia atómica de todos los locks concedidos en este instante,
+        recurso por recurso. Pensada para tests de propiedades e
+        introspección: al tomarse bajo `self._cond`, es una foto coherente
+        de todo el estado a la vez, a diferencia de llamar a `holds()`
+        recurso por recurso (que sólo es atómico por llamada individual).
+        """
+        with self._cond:
+            return {resource: dict(holders) for resource, holders in self._holders.items()}
+
     # ------------------------------------------------------------------
     # Concesión de locks en cola (FIFO con prevención de starvation)
     # ------------------------------------------------------------------
