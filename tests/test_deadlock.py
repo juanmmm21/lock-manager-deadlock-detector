@@ -160,20 +160,33 @@ def test_larger_cycles_are_resolved_without_permanent_hang(cycle_size: int) -> N
     assert mgr.snapshot_wait_for_graph() == {}
 
 
+def _wait_until_waiting(mgr: LockManager[str], txn: TransactionId, timeout: float = 5.0) -> None:
+    """Espera (sondeando el wait-for graph) a que `txn` esté encolada."""
+    deadline = time.monotonic() + timeout
+    while txn not in mgr.snapshot_wait_for_graph():
+        if time.monotonic() > deadline:
+            raise AssertionError(f"{txn} nunca llegó a esperar el lock")
+        time.sleep(0.002)
+
+
 def test_non_cyclic_wait_chain_never_triggers_a_false_deadlock() -> None:
     """T3 espera a T2, que espera a T1 -- una cadena, no un ciclo. Ninguna
     transacción debe abortarse por deadlock: en cuanto T1 libera, la
-    cadena se resuelve entera sin intervención del detector."""
+    cadena se resuelve entera sin intervención del detector.
+
+    El orden de la cadena se fuerza: T3 no pide el lock hasta que T2 ya
+    está en la cola. Antes ambos hilos salían de una barrera a la vez y,
+    si T3 se encolaba primero, recibía el lock al liberar T1 y el test
+    liberaba un lock que T2 no tenía (`LockNotHeldError`, intermitente).
+    """
     mgr: LockManager[str] = LockManager(default_timeout=10.0)
     t1, t2, t3 = TransactionId(1), TransactionId(2), TransactionId(3)
     mgr.acquire(t1, "row", LockMode.EXCLUSIVE)
 
-    started = threading.Barrier(3)
     results: dict[TransactionId, str] = {}
     results_lock = threading.Lock()
 
     def waiter(txn: TransactionId) -> None:
-        started.wait()
         try:
             mgr.acquire(txn, "row", LockMode.EXCLUSIVE)
             outcome = "completó"
@@ -185,13 +198,14 @@ def test_non_cyclic_wait_chain_never_triggers_a_false_deadlock() -> None:
     t2_thread = threading.Thread(target=waiter, args=(t2,))
     t3_thread = threading.Thread(target=waiter, args=(t3,))
     t2_thread.start()
+    _wait_until_waiting(mgr, t2)
     t3_thread.start()
-    started.wait()
-    # deja que ambas peticiones se encolen antes de liberar t1
-    time.sleep(0.1)
+    _wait_until_waiting(mgr, t3)
+    assert mgr.snapshot_wait_for_graph()[t2] == frozenset({t1})
+
     mgr.release(t1, "row")
     t2_thread.join(timeout=5)
-    # t2 ya debería tener el lock; libéralo para que t3 progrese también
+    # la cola es FIFO: t2 tiene el lock; liberarlo deja progresar a t3
     mgr.release(t2, "row")
     t3_thread.join(timeout=5)
 
